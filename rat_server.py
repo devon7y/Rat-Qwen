@@ -24,6 +24,13 @@ from transformers import (AutoConfig, AutoModelForCausalLM,  # noqa: E402
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
+# Windows consoles default to cp1252, which can't encode the emoji in our log prints -> force UTF-8.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 
 def pick_device():
     if torch.cuda.is_available():
