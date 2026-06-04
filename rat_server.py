@@ -75,9 +75,6 @@ feat = {"feat": a.feature, "layer": a.layer, "e_f": e_f.to(dev), "b_f": b_f,
 layers_mod[a.layer].register_forward_hook(LayerClamp(a.layer, [feat]))
 gen_lock = threading.Lock()
 
-with open(os.path.join(ROOT, "rat_ui.html"), "rb") as f:
-    HTML = f.read()
-
 
 def build_ids(messages, params):
     """chat mode -> chat template; base mode -> raw User/Assistant completion."""
@@ -177,11 +174,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path in ("/", "/index.html"):
+            try:
+                with open(os.path.join(ROOT, "rat_ui.html"), "rb") as f:
+                    html = f.read()          # read fresh each load -> UI edits need no restart
+            except OSError:
+                self.send_error(500)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(HTML)))
+            self.send_header("Content-Length", str(len(html)))
             self.end_headers()
-            self.wfile.write(HTML)
+            self.wfile.write(html)
         else:
             self.send_error(404)
 

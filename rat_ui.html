@@ -38,10 +38,17 @@
   #hint { background:#f1e7d6; color:#8a6d4a; font-size:12px; padding:6px 18px; border-bottom:1px solid #ddcdb8; }
   #hint b { color:#7a3b2a; }
   #chat { flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:10px; }
-  .msg { max-width:78%; padding:10px 14px; border-radius:14px; white-space:pre-wrap; line-height:1.45; font-size:15px; }
-  .user { align-self:flex-end; background:var(--brown); color:var(--cream); border-bottom-right-radius:4px; }
+  .msg { max-width:78%; padding:10px 14px; border-radius:14px; line-height:1.45; font-size:15px; }
+  .user { align-self:flex-end; background:var(--brown); color:var(--cream); border-bottom-right-radius:4px; white-space:pre-wrap; }
   .bot  { align-self:flex-start; background:var(--bubble); color:var(--brown-d); border-bottom-left-radius:4px; }
   .bot.empty::after { content:"🐀 ..."; opacity:.5; }
+  .bot p { margin:0 0 8px; } .bot p:last-child { margin-bottom:0; }
+  .bot ul, .bot ol { margin:4px 0 8px; padding-left:22px; } .bot li { margin:2px 0; }
+  .bot h1,.bot h2,.bot h3,.bot h4 { margin:10px 0 4px; font-size:1.05em; font-weight:700; }
+  .bot code { background:#e0d3bf; padding:1px 5px; border-radius:4px; font-size:.9em; }
+  .bot pre { background:#e7dcc9; padding:9px 11px; border-radius:8px; overflow-x:auto; margin:6px 0; }
+  .bot pre code { background:none; padding:0; }
+  .bot a { color:#7a3b2a; } .bot strong { font-weight:700; }
   #inputrow { display:flex; gap:10px; padding:14px 18px; background:#efe6d8; border-top:1px solid #ddcdb8; }
   #msg { flex:1; padding:11px 14px; border:1px solid #cdb79c; border-radius:10px; font:inherit; }
   #send { background:var(--accent); color:#fff; }
@@ -150,6 +157,34 @@
   const chat=$('chat'), input=$('msg'), sendBtn=$('send'), slider=$('strength'), lvl=$('lvl'), ratsEl=$('rats');
   let messages = [];
 
+  // --- tiny, XSS-safe markdown renderer (escape first, then format) ---------------------------
+  function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function inlineMd(s){
+    s = s.replace(/`([^`]+)`/g, (m,c)=>'<code>'+c+'</code>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+    s = s.replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,!?]|$)/g, '$1<em>$2</em>');
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    return s;
+  }
+  function renderMarkdown(src){
+    const cb = [];
+    src = src.replace(/```[^\n]*\n?([\s\S]*?)```/g, (m,code)=>{ cb.push(code.replace(/\n$/,'')); return ' '+(cb.length-1)+' '; });
+    src = esc(src);
+    const lines = src.split('\n'); let html=''; let para=[];
+    const flushPara=()=>{ if(para.length){ html+='<p>'+para.map(inlineMd).join('<br>')+'</p>'; para=[]; } };
+    for(let i=0;i<lines.length;){
+      const line=lines[i]; let m;
+      if((m=line.match(/^ (\d+) $/))){ flushPara(); html+='<pre><code>'+esc(cb[+m[1]])+'</code></pre>'; i++; continue; }
+      if((m=line.match(/^(#{1,4})\s+(.*)$/))){ flushPara(); const n=m[1].length; html+='<h'+n+'>'+inlineMd(m[2])+'</h'+n+'>'; i++; continue; }
+      if(/^\s*$/.test(line)){ flushPara(); i++; continue; }
+      if(/^\s*[-*+]\s+/.test(line)){ flushPara(); const it=[]; while(i<lines.length&&/^\s*[-*+]\s+/.test(lines[i])){ it.push(lines[i].replace(/^\s*[-*+]\s+/,'')); i++; } html+='<ul>'+it.map(x=>'<li>'+inlineMd(x)+'</li>').join('')+'</ul>'; continue; }
+      if(/^\s*\d+\.\s+/.test(line)){ flushPara(); const it=[]; while(i<lines.length&&/^\s*\d+\.\s+/.test(lines[i])){ it.push(lines[i].replace(/^\s*\d+\.\s+/,'')); i++; } html+='<ol>'+it.map(x=>'<li>'+inlineMd(x)+'</li>').join('')+'</ol>'; continue; }
+      para.push(line); i++;
+    }
+    flushPara(); return html;
+  }
+
   const DEFAULTS = { strength:16, mt:1000, soft:0, temp:0.8, topp:0.95, topk:0, reppen:1, ngram:0,
                      think:'off', mode:'chat', seed:0, seedlock:true, sys:'' };
   const valSpans = { mt:'mt-v', soft:'soft-v', temp:'temp-v', topp:'topp-v', topk:'topk-v', reppen:'reppen-v', ngram:'ngram-v' };
@@ -219,7 +254,7 @@
       while (true){
         const {done, value} = await reader.read(); if (done) break;
         full += dec.decode(value, {stream:true});
-        botEl.classList.remove('empty'); botEl.textContent = full; chat.scrollTop = chat.scrollHeight;
+        botEl.classList.remove('empty'); botEl.innerHTML = renderMarkdown(full); chat.scrollTop = chat.scrollHeight;
       }
       messages.push({role:'assistant', content: full});
     } catch(e){ botEl.textContent = '⚠️ (the rat got away — is the server still running?)'; }
