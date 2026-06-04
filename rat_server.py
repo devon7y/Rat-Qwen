@@ -50,8 +50,10 @@ tok = AutoTokenizer.from_pretrained(a.model)
 cfg = AutoConfig.from_pretrained(a.model)
 archs = " ".join(getattr(cfg, "architectures", []) or [])
 loader = AutoModelForImageTextToText if "ConditionalGeneration" in archs else AutoModelForCausalLM
-model = loader.from_pretrained(a.model, dtype=dtype)
-model.to(dev)
+# Stream weights straight onto the device (low_cpu_mem_usage + device_map) so we never hold a
+# full CPU copy *and* a full device copy at once -- critical on 16GB unified-memory Macs.
+model = loader.from_pretrained(a.model, dtype=dtype, low_cpu_mem_usage=True,
+                               device_map={"": dev})
 model.eval()
 if tok.pad_token_id is None:
     tok.pad_token_id = tok.eos_token_id
