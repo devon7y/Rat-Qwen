@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Tiny local web UI for Rat-Qwen -- standard library only, NO extra dependencies.
 
-Loads the steered model once and serves a rat-themed chat page with a single "Rat Brain" strength
-slider (0 = off). No slash commands, no Flask. Streams replies token-by-token.
-
-  python rat_server.py            # loads the model, opens http://localhost:7860 in your browser
+Loads the steered model once and serves a rat-themed chat page. Every god_chat generation control
+(temperature, top-p, top-k, repetition penalty, n-gram block, hard/soft max tokens, thinking, mode,
+seed, system prompt) plus the Rat Brain strength is a UI control, sent per request.
 """
 import argparse
 import json
@@ -17,10 +16,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from god_chat import LayerClamp, dirs_for, find_layers, load_sae  # noqa: E402
+from god_chat import (LayerClamp, SoftStopAfterBoundary, dirs_for,  # noqa: E402
+                      find_layers, load_sae)
 from transformers import (AutoConfig, AutoModelForCausalLM,  # noqa: E402
                           AutoModelForImageTextToText, AutoTokenizer,
-                          TextIteratorStreamer)
+                          StoppingCriteriaList, TextIteratorStreamer)
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -39,7 +39,7 @@ ap.add_argument("--sae-dir", default=".runtime/sae")
 ap.add_argument("--layer", type=int, default=19)
 ap.add_argument("--feature", type=int, default=26631)
 ap.add_argument("--port", type=int, default=7860)
-ap.add_argument("--max-new-tokens", type=int, default=220)
+ap.add_argument("--max-new-tokens", type=int, default=1000)
 ap.add_argument("--no-browser", action="store_true", help="don't auto-open a browser")
 a = ap.parse_args()
 
@@ -72,22 +72,96 @@ with open(os.path.join(ROOT, "rat_ui.html"), "rb") as f:
     HTML = f.read()
 
 
-def generate_chunks(messages, strength):
-    feat["target"] = max(0.0, float(strength))
+def build_ids(messages, params):
+    """chat mode -> chat template; base mode -> raw User/Assistant completion."""
+    system = (params.get("system") or "").strip()
+    if params.get("mode", "chat") == "base":
+        text = (system + "\n\n") if system else ""
+        for m in messages[:-1]:
+            who = "User" if m.get("role") == "user" else "Assistant"
+            text += f"{who}: {m.get('content', '')}\n"
+        if messages:
+            text += f"User: {messages[-1].get('content', '')}\nAssistant:"
+        return tok(text, return_tensors="pt").input_ids.to(dev)
+    msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
+    think_on = params.get("thinking", "off") != "off"
     try:
-        ids = tok.apply_chat_template(messages, add_generation_prompt=True,
-                                      return_tensors="pt", enable_thinking=False)
+        ids = tok.apply_chat_template(msgs, add_generation_prompt=True,
+                                      return_tensors="pt", enable_thinking=think_on)
     except TypeError:
-        ids = tok.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt")
+        ids = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt")
     if not isinstance(ids, torch.Tensor):
         ids = ids["input_ids"]
-    ids = ids.to(dev)
+    return ids.to(dev)
+
+
+def strip_think_stream(streamer):
+    """Drop <think>...</think> spans from a streaming text generator (thinking=hide)."""
+    buf, in_think = "", False
+    for chunk in streamer:
+        buf += chunk
+        out = ""
+        while buf:
+            if not in_think:
+                i = buf.find("<think>")
+                if i == -1:
+                    if len(buf) > 7:           # hold back a tail in case the tag is split
+                        out += buf[:-7]
+                        buf = buf[-7:]
+                    break
+                out += buf[:i]
+                buf = buf[i + 7:]
+                in_think = True
+            else:
+                j = buf.find("</think>")
+                if j == -1:
+                    if len(buf) > 8:
+                        buf = buf[-8:]
+                    break
+                buf = buf[j + 8:]
+                in_think = False
+        if out:
+            yield out
+    if buf and not in_think:
+        yield buf
+
+
+def generate_chunks(messages, params):
+    feat["target"] = max(0.0, float(params.get("strength", 16)))
+    ids = build_ids(messages, params)
     streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
     kwargs = dict(input_ids=ids, attention_mask=torch.ones_like(ids),
-                  max_new_tokens=a.max_new_tokens, do_sample=True, temperature=0.8,
-                  top_p=0.95, pad_token_id=tok.pad_token_id, streamer=streamer)
+                  max_new_tokens=int(params.get("max_tokens", a.max_new_tokens)),
+                  pad_token_id=tok.pad_token_id, streamer=streamer)
+    temp = float(params.get("temperature", 0.8))
+    if temp > 0:
+        kwargs.update(do_sample=True, temperature=temp, top_p=float(params.get("top_p", 0.95)))
+        top_k = int(params.get("top_k", 0))
+        if top_k > 0:
+            kwargs["top_k"] = top_k
+    else:
+        kwargs["do_sample"] = False
+    reppen = float(params.get("rep_penalty", 1.0))
+    if reppen != 1.0:
+        kwargs["repetition_penalty"] = reppen
+    ngram = int(params.get("no_repeat_ngram", 0))
+    if ngram > 0:
+        kwargs["no_repeat_ngram_size"] = ngram
+    soft = int(params.get("soft_max", 0))
+    if soft > 0:
+        kwargs["stopping_criteria"] = StoppingCriteriaList(
+            [SoftStopAfterBoundary(tok, ids.shape[1], soft)])
+    seed = params.get("seed", None)
+    if seed not in (None, ""):                     # locked seed -> reproducible per prompt
+        try:
+            torch.manual_seed(int(seed))
+        except (TypeError, ValueError):
+            pass
     threading.Thread(target=model.generate, kwargs=kwargs, daemon=True).start()
-    yield from streamer
+    if params.get("thinking", "off") == "hide":
+        yield from strip_think_stream(streamer)
+    else:
+        yield from streamer
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -115,11 +189,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         with gen_lock:                       # one model -> serialize requests
             try:
-                for chunk in generate_chunks(data.get("messages", []), data.get("strength", 16)):
+                for chunk in generate_chunks(data.get("messages", []), data):
                     self.wfile.write(chunk.encode("utf-8"))
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
-                pass                          # the browser navigated away mid-reply
+                pass                          # browser navigated away mid-reply
 
 
 if __name__ == "__main__":
