@@ -1,0 +1,9 @@
+# downloaded at setup time (too big for git) -- fetched from Hugging Face by download_assets.py
+.venv/
+models/
+sae/
+
+# python / macOS junk
+__pycache__/
+*.pyc
+.DS_Store

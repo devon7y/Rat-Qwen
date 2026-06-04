@@ -1,0 +1,8 @@
+torch
+transformers==5.10.1
+accelerate
+safetensors
+sentencepiece
+tiktoken
+einops
+huggingface_hub
