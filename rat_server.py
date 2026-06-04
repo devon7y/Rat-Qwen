@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from god_chat import (LayerClamp, SoftStopAfterBoundary, dirs_for,  # noqa: E402
+from god_chat import (SoftStopAfterBoundary, dirs_for,  # noqa: E402
                       find_layers, load_sae)
 from transformers import (AutoConfig, AutoModelForCausalLM,  # noqa: E402
                           AutoModelForImageTextToText, AutoTokenizer,
@@ -46,8 +46,10 @@ ap.add_argument("--sae-dir", default=".runtime/sae")
 ap.add_argument("--layer", type=int, default=19)
 ap.add_argument("--feature", type=int, default=26631)
 ap.add_argument("--port", type=int, default=7860)
-ap.add_argument("--max-new-tokens", type=int, default=1000)
+ap.add_argument("--max-new-tokens", type=int, default=500)
 ap.add_argument("--no-browser", action="store_true", help="don't auto-open a browser")
+ap.add_argument("--max-concurrent", type=int, default=6,
+                help="max simultaneous generations (bounds VRAM)")
 a = ap.parse_args()
 
 dev = pick_device()
@@ -69,11 +71,33 @@ d_model = (getattr(model.config, "hidden_size", None)
 layers_mod = find_layers(model)
 _, find = load_sae(os.path.join(a.sae_dir, f"layer{a.layer}.sae.pt"))
 d_f, e_f, b_f = dirs_for(find, a.feature, d_model)
-# one clamp hook; we mutate feat["target"] per request (0 = steering off)
-feat = {"feat": a.feature, "layer": a.layer, "e_f": e_f.to(dev), "b_f": b_f,
-        "d_f": d_f.to(dev), "target": 0.0, "act": 0.0}
-layers_mod[a.layer].register_forward_hook(LayerClamp(a.layer, [feat]))
-gen_lock = threading.Lock()
+e_f, d_f = e_f.to(dev), d_f.to(dev)
+_tls = threading.local()    # per-request rat-strength, so concurrent chats don't clobber each other
+
+
+class ConcurrentClamp:
+    """SAE clamp on one layer. Reads its target from thread-local storage, so each request's
+    generate() worker thread applies its own rat-strength independently of the others."""
+
+    def __init__(self, e_f, b_f, d_f):
+        self.e_f, self.b_f, self.d_f = e_f, b_f, d_f
+
+    def __call__(self, module, inp, out):
+        t = getattr(_tls, "target", 0.0)
+        if not t or t <= 0:
+            return out
+        h = out[0] if isinstance(out, tuple) else out
+        a = torch.relu(h.float() @ self.e_f + self.b_f)
+        delta = ((t - a).clamp(min=0).unsqueeze(-1) * self.d_f).to(h.dtype)
+        h = h + delta
+        return (h,) + tuple(out[1:]) if isinstance(out, tuple) else h
+
+
+layers_mod[a.layer].register_forward_hook(ConcurrentClamp(e_f, b_f, d_f))
+# CUDA runs generate() from several threads at once; Apple Metal (MPS) can't, so serialize there.
+_max_par = 1 if dev == "mps" else a.max_concurrent
+gen_sem = threading.Semaphore(_max_par)
+print(f"max concurrent generations: {_max_par}", flush=True)
 
 
 def build_ids(messages, params):
@@ -131,7 +155,7 @@ def strip_think_stream(streamer):
 
 
 def generate_chunks(messages, params):
-    feat["target"] = max(0.0, float(params.get("strength", 16)))
+    strength = max(0.0, float(params.get("strength", 17)))
     ids = build_ids(messages, params)
     streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
     kwargs = dict(input_ids=ids, attention_mask=torch.ones_like(ids),
@@ -155,13 +179,19 @@ def generate_chunks(messages, params):
     if soft > 0:
         kwargs["stopping_criteria"] = StoppingCriteriaList(
             [SoftStopAfterBoundary(tok, ids.shape[1], soft)])
-    seed = params.get("seed", None)
-    if seed not in (None, ""):                     # locked seed -> reproducible per prompt
+    def _run():                                    # worker thread carries its own rat-strength
+        _tls.target = strength
+        seed = params.get("seed", None)
+        if seed not in (None, ""):                 # locked seed -> reproducible (best-effort under load)
+            try:
+                torch.manual_seed(int(seed))
+            except (TypeError, ValueError):
+                pass
         try:
-            torch.manual_seed(int(seed))
-        except (TypeError, ValueError):
-            pass
-    threading.Thread(target=model.generate, kwargs=kwargs, daemon=True).start()
+            model.generate(**kwargs)
+        finally:
+            _tls.target = 0.0
+    threading.Thread(target=_run, daemon=True).start()
     if params.get("thinking", "off") == "hide":
         yield from strip_think_stream(streamer)
     else:
@@ -197,7 +227,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
-        with gen_lock:                       # one model -> serialize requests
+        with gen_sem:                        # cap concurrent generations (bounds VRAM)
             try:
                 for chunk in generate_chunks(data.get("messages", []), data):
                     self.wfile.write(chunk.encode("utf-8"))
