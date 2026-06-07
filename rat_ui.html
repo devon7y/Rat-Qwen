@@ -35,8 +35,8 @@
   .seedrow input[type=number] { width:90px; }
   #note { grid-column:1 / -1; font-size:11px; opacity:.6; }
   #reset-settings { align-self:end; }
-  #hint { background:#f1e7d6; color:#8a6d4a; font-size:12px; padding:6px 18px; border-bottom:1px solid #ddcdb8; }
-  #hint b { color:#7a3b2a; }
+  #tip { grid-column:1 / -1; color:#8a6d4a; font-size:12px; line-height:1.4; }
+  #tip b { color:#7a3b2a; }
   #chat { flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:10px; }
   .msg { max-width:78%; padding:10px 14px; border-radius:14px; line-height:1.45; font-size:15px; }
   .user { align-self:flex-end; background:var(--brown); color:var(--cream); border-bottom-right-radius:4px; white-space:pre-wrap; }
@@ -139,11 +139,10 @@
     <div id="note">Not shown: <code>/clamp</code> (a live activation readout) and <code>/e114</code>
       (the MoE-router monitor) are god_chat terminal diagnostics — the router monitor auto-disables
       on this 2B model, so neither is a control here.</div>
+    <div id="tip">Tip: drag 🧠 Rat Brain past ~25 to watch the rat concept <b>overload and break</b> the
+      model — at the top it dissolves into "gn-gn-gn" (the raw <i>gnaw</i> fragment). That meltdown is
+      the steering mechanism laid bare. 🐀💥</div>
   </div>
-
-  <div id="hint">Tip: drag 🧠 Rat Brain past ~25 to watch the rat concept <b>overload and break</b> the
-  model — at the top it dissolves into "gn-gn-gn" (the raw <i>gnaw</i> fragment). That meltdown is the
-  steering mechanism laid bare. 🐀💥</div>
 
   <div id="chat"></div>
 
