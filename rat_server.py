@@ -155,7 +155,7 @@ def strip_think_stream(streamer):
 
 
 def generate_chunks(messages, params):
-    strength = max(0.0, float(params.get("strength", 17)))
+    strength = max(0.0, float(params.get("strength", 16)))
     ids = build_ids(messages, params)
     streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
     kwargs = dict(input_ids=ids, attention_mask=torch.ones_like(ids),

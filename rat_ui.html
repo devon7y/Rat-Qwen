@@ -63,7 +63,7 @@
 
   <div id="controls">
     <label for="strength">🧠 Rat Brain</label>
-    <input type="range" id="strength" min="0" max="60" step="1" value="17"/>
+    <input type="range" id="strength" min="0" max="60" step="1" value="16"/>
     <span id="lvl"></span>
     <span id="rats"></span>
     <button id="gear">⚙️ Settings</button>
@@ -184,7 +184,7 @@
     flushPara(); return html;
   }
 
-  const DEFAULTS = { strength:17, mt:500, soft:0, temp:0.8, topp:0.95, topk:0, reppen:1, ngram:0,
+  const DEFAULTS = { strength:16, mt:500, soft:0, temp:0.8, topp:0.95, topk:0, reppen:1, ngram:0,
                      think:'off', mode:'chat', seed:0, seedlock:true, sys:'' };
   const valSpans = { mt:'mt-v', soft:'soft-v', temp:'temp-v', topp:'topp-v', topk:'topk-v', reppen:'reppen-v', ngram:'ngram-v' };
   function fmt(id, v){
