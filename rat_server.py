@@ -50,6 +50,10 @@ ap.add_argument("--max-new-tokens", type=int, default=500)
 ap.add_argument("--no-browser", action="store_true", help="don't auto-open a browser")
 ap.add_argument("--max-concurrent", type=int, default=6,
                 help="max simultaneous generations (bounds VRAM)")
+ap.add_argument("--quantize", choices=["off", "8bit", "4bit"], default="off",
+                help="bitsandbytes quantization on CUDA to cut VRAM (8bit ~3.5GB, 4bit ~2.5GB)")
+ap.add_argument("--strength-scale", type=float, default=1.0,
+                help="multiply slider strength (quantization shifts the steering range; ~1.3 for 8bit)")
 a = ap.parse_args()
 
 dev = pick_device()
@@ -60,9 +64,21 @@ cfg = AutoConfig.from_pretrained(a.model)
 archs = " ".join(getattr(cfg, "architectures", []) or [])
 loader = AutoModelForImageTextToText if "ConditionalGeneration" in archs else AutoModelForCausalLM
 # Stream weights straight onto the device (low_cpu_mem_usage + device_map) so we never hold a
-# full CPU copy *and* a full device copy at once -- critical on 16GB unified-memory Macs.
-model = loader.from_pretrained(a.model, dtype=dtype, low_cpu_mem_usage=True,
-                               device_map={"": dev})
+# full CPU copy *and* a full device copy at once.
+load_kw = dict(low_cpu_mem_usage=True, device_map={"": dev})
+if a.quantize != "off" and dev == "cuda":
+    from transformers import BitsAndBytesConfig
+    if a.quantize == "8bit":
+        load_kw["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    else:
+        load_kw["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16)
+    print(f"quantization: {a.quantize} (bitsandbytes)", flush=True)
+else:
+    load_kw["dtype"] = dtype
+    if a.quantize != "off":
+        print(f"--quantize {a.quantize} ignored: bitsandbytes needs CUDA (device={dev})", flush=True)
+model = loader.from_pretrained(a.model, **load_kw)
 model.eval()
 if tok.pad_token_id is None:
     tok.pad_token_id = tok.eos_token_id
@@ -155,7 +171,7 @@ def strip_think_stream(streamer):
 
 
 def generate_chunks(messages, params):
-    strength = max(0.0, float(params.get("strength", 16)))
+    strength = max(0.0, float(params.get("strength", 16))) * a.strength_scale
     ids = build_ids(messages, params)
     streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
     kwargs = dict(input_ids=ids, attention_mask=torch.ones_like(ids),
